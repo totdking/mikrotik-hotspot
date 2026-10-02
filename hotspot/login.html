@@ -53,6 +53,16 @@
 
                 <!-- ═══ VIEW 1: Plan Selection ═══ -->
                 <div id="view-plans">
+                    <!-- Saved Voucher Banner (Auto-detected on device) -->
+                    <div id="saved-voucher-card" class="saved-voucher-card" style="display:none;">
+                        <div class="saved-badge">&#9889; Active Voucher Available</div>
+                        <div class="saved-code" id="saved-voucher-display"></div>
+                        <div class="saved-expiry" id="saved-voucher-expiry"></div>
+                        <button type="button" class="saved-reconnect-btn" onclick="reconnectWithSaved()">
+                            Reconnect Now &rarr;
+                        </button>
+                    </div>
+
                     <label style="margin-bottom:14px;">
                         <img class="ico" src="img/user.svg" alt="#" />
                         <input id="customer-email" type="text" placeholder="Email for receipt (optional)" />
@@ -212,7 +222,7 @@
                             isCompleted = true;
                             clearInterval(pollInterval);
                             setPlanCardsDisabled(false);
-                            displayVoucher(result.voucher_code);
+                            displayVoucher(result.voucher_code, result.plan, result.expires_at);
                         }
                     })
                     .catch(function() {});
@@ -246,13 +256,27 @@
             });
         }
 
-        function displayVoucher(code) {
+        function displayVoucher(code, plan, expiresAt) {
             document.getElementById('voucher-code').textContent = code;
             document.getElementById('voucher-input').value = code;
             var passEl = document.getElementById('voucher-password');
             if (passEl) {
                 passEl.value = code;
             }
+
+            // Save voucher and metadata to device localStorage
+            try {
+                localStorage.setItem('hotspot_voucher', code);
+                if (plan) localStorage.setItem('hotspot_plan', plan);
+                if (expiresAt) localStorage.setItem('hotspot_expires', expiresAt);
+                var emailInput = document.getElementById('customer-email');
+                if (emailInput && emailInput.value.trim()) {
+                    localStorage.setItem('hotspot_email', emailInput.value.trim());
+                }
+            } catch (e) {
+                console.warn('[Storage Error] Could not save to localStorage:', e);
+            }
+
             showView('voucher-result');
         }
 
@@ -265,7 +289,7 @@
             })
             .then(function(data) {
                 if (data.status === 'success' && data.voucher_code) {
-                    displayVoucher(data.voucher_code);
+                    displayVoucher(data.voucher_code, data.plan, data.expires_at);
                 } else {
                     showView('plans');
                 }
@@ -291,7 +315,7 @@
             })
             .then(function(data) {
                 if (data.status === 'success' && data.voucher_code) {
-                    displayVoucher(data.voucher_code);
+                    displayVoucher(data.voucher_code, data.plan, data.expires_at);
                 } else {
                     throw new Error('Payment verification incomplete. No voucher issued.');
                 }
@@ -305,6 +329,81 @@
                 }
                 showView('plans');
             });
+        }
+
+        // ═══ Device-side Voucher Persistence & Auto-Fill ═══
+        function initSavedVoucher() {
+            try {
+                // Restore remembered email if present
+                var savedEmail = localStorage.getItem('hotspot_email');
+                var emailInput = document.getElementById('customer-email');
+                if (savedEmail && emailInput && !emailInput.value) {
+                    emailInput.value = savedEmail;
+                }
+
+                var savedVoucher = localStorage.getItem('hotspot_voucher');
+                if (!savedVoucher) return;
+
+                var savedExpires = localStorage.getItem('hotspot_expires');
+                var savedPlan = localStorage.getItem('hotspot_plan') || '';
+
+                // If expiry timestamp exists, check if already expired
+                if (savedExpires && savedExpires.length >= 19) {
+                    var expDate = new Date(savedExpires.replace(' ', 'T'));
+                    if (!isNaN(expDate.getTime()) && Date.now() > expDate.getTime()) {
+                        // Expired, clear from device
+                        localStorage.removeItem('hotspot_voucher');
+                        localStorage.removeItem('hotspot_expires');
+                        localStorage.removeItem('hotspot_plan');
+                        return;
+                    }
+                }
+
+                // Pre-fill manual voucher login inputs
+                var manualUser = document.getElementById('manual-user');
+                var manualPass = document.getElementById('manual-pass');
+                if (manualUser) manualUser.value = savedVoucher;
+                if (manualPass) manualPass.value = savedVoucher;
+
+                // Show active voucher card on plans page
+                var banner = document.getElementById('saved-voucher-card');
+                var displayEl = document.getElementById('saved-voucher-display');
+                var expiryEl = document.getElementById('saved-voucher-expiry');
+                if (banner && displayEl) {
+                    displayEl.textContent = savedVoucher;
+                    if (expiryEl && savedExpires) {
+                        expiryEl.textContent = (savedPlan ? savedPlan + ' • ' : '') + 'Valid until: ' + savedExpires;
+                    }
+                    banner.style.display = 'block';
+                }
+            } catch (e) {
+                console.warn('[Storage Error]', e);
+            }
+        }
+
+        function reconnectWithSaved() {
+            var savedVoucher = localStorage.getItem('hotspot_voucher');
+            if (!savedVoucher) return;
+
+            var vInput = document.getElementById('voucher-input');
+            var vPass = document.getElementById('voucher-password');
+            if (vInput) vInput.value = savedVoucher;
+            if (vPass) vPass.value = savedVoucher;
+
+            if (typeof doLogin === 'function') {
+                doLogin(document.auto_login || document.manual_login);
+            } else if (document.auto_login) {
+                document.auto_login.submit();
+            } else if (document.manual_login) {
+                document.manual_login.submit();
+            }
+        }
+
+        // Initialize saved voucher on page load
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initSavedVoucher);
+        } else {
+            initSavedVoucher();
         }
     </script>
 </body>

@@ -133,3 +133,64 @@ a,body,div,form,html,img,input,label,p,span{margin:0;padding:0;border:0;font-fam
 .dark .nav-link {
   color: #e74c3c;
 }
+
+/* ═══ Saved Voucher Card (localStorage) ═══ */
+.saved-voucher-card {
+  background: rgba(39, 174, 96, 0.2);
+  border: 1px solid #27ae60;
+  border-radius: 8px;
+  padding: 14px 12px;
+  margin-bottom: 18px;
+  text-align: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+.saved-badge {
+  color: #2ecc71;
+  font-size: 13px !important;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.saved-code {
+  color: #fff;
+  font-family: monospace, Courier, sans-serif;
+  font-size: 22px !important;
+  font-weight: 700;
+  letter-spacing: 2px;
+  margin-bottom: 4px;
+}
+.saved-expiry {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px !important;
+  margin-bottom: 10px;
+}
+.saved-reconnect-btn {
+  background: #27ae60;
+  color: #fff;
+  border: 0;
+  cursor: pointer;
+  padding: 8px 18px;
+  font-size: 13px !important;
+  font-weight: 700;
+  border-radius: 5px;
+  transition: background 0.2s ease-in-out;
+  width: auto;
+  display: inline-block;
+}
+.saved-reconnect-btn:hover {
+  background: #219653;
+}
+.lite .saved-voucher-card {
+  background: rgba(39, 174, 96, 0.1);
+  border-color: #27ae60;
+}
+.lite .saved-code {
+  color: #1a252f;
+}
+.lite .saved-expiry {
+  color: #555;
+}
+.dark .saved-voucher-card {
+  background: rgba(39, 174, 96, 0.18);
+}
