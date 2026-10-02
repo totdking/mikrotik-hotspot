@@ -13,16 +13,19 @@ const PLANS = {
     amount: 100000, // ₦1,000.00
     label: 'Daily (20h)',
     profile: 'DailySub',
+    durationHours: 20, // 20 hours access
   },
   WeeklySub: {
     amount: 500000, // ₦5,000.00
     label: 'Weekly (7d)',
     profile: 'WeeklySub',
+    durationHours: 7 * 24, // 168 hours access (7 days)
   },
   MonthlySub: {
     amount: 2000000, // ₦20,000.00 (2 devices)
     label: 'Monthly (30d)',
     profile: 'MonthlySub',
+    durationHours: 30 * 24, // 720 hours access (30 days)
   },
 };
 
@@ -34,14 +37,15 @@ const {
   MIKROTIK_PASSWORD = '',
   MIKROTIK_PORT = 8728,
   PORT = 3000,
+  TIMEZONE = 'Africa/Lagos',
 } = process.env;
 
 // ─── In-memory Transaction Store ────────────────────────────────
-// reference -> { plan, voucher, status, createdAt }
+// reference -> { plan, voucher, expiresAt, status, createdAt }
 const transactions = new Map();
 
 // Auto-purge transactions older than 24 hours
-setInterval(() => {
+const purgeInterval = setInterval(() => {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [ref, tx] of transactions) {
     if (tx.createdAt < cutoff) {
@@ -49,6 +53,7 @@ setInterval(() => {
     }
   }
 }, 60 * 60 * 1000);
+purgeInterval.unref();
 
 // ─── Middleware ─────────────────────────────────────────────────
 // Preserve raw body for Paystack webhook HMAC verification
@@ -76,7 +81,42 @@ function generateVoucher() {
   return code;
 }
 
-async function createMikroTikUser(username, password, profile) {
+/**
+ * Formats a Date object into RouterOS v7 scheduler comment format:
+ * "YYYY-MM-DD HH:MM:SS" (exactly 19 characters, 24-hour cycle)
+ * Evaluated by RouterOS:
+ * [:len $comment] >= 19 and [:pick $comment 4] = "-" and [:pick $comment 7] = "-"
+ */
+function formatExpirationDate(date, timeZone = TIMEZONE) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const map = {};
+  for (const p of parts) {
+    map[p.type] = p.value;
+  }
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
+/**
+ * Calculates the expiration timestamp string for a plan based on its duration.
+ */
+function calculateExpirationComment(planKey, fromDate = new Date(), timeZone = TIMEZONE) {
+  const plan = PLANS[planKey];
+  const durationHours = plan?.durationHours || 24;
+  const expiryDate = new Date(fromDate.getTime() + durationHours * 60 * 60 * 1000);
+  return formatExpirationDate(expiryDate, timeZone);
+}
+
+async function createMikroTikUser(username, password, profile, comment) {
   const client = new RouterOSAPI({
     host: MIKROTIK_HOST,
     user: MIKROTIK_USER,
@@ -90,9 +130,9 @@ async function createMikroTikUser(username, password, profile) {
       `=name=${username}`,
       `=password=${password}`,
       `=profile=${profile}`,
-      `=comment=Paystack: ${profile}`,
+      `=comment=${comment}`,
     ]);
-    console.log(`[MikroTik] Successfully created hotspot user: ${username} (profile: ${profile})`);
+    console.log(`[MikroTik] Successfully created hotspot user: ${username} (profile: ${profile}, comment: ${comment})`);
   } catch (err) {
     console.error(`[MikroTik Error] Failed to create user ${username}:`, err.message || err);
     throw err;
@@ -119,6 +159,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+    timezone: TIMEZONE,
     mikrotikHost: MIKROTIK_HOST,
     activeTransactions: transactions.size,
   });
@@ -139,7 +180,7 @@ app.post('/api/initialize', async (req, res) => {
   const reference = `HOTSPOT-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
   // If a valid email is passed, Paystack will send the payment receipt to it.
-  // Otherwise, fallback to a dead address like guest@example.com.
+  // Otherwise, fallback to guest@example.com.
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const trimmedEmail = typeof clientEmail === 'string' ? clientEmail.trim() : '';
   const email = (trimmedEmail && emailRegex.test(trimmedEmail))
@@ -175,6 +216,7 @@ app.post('/api/initialize', async (req, res) => {
     transactions.set(reference, {
       plan,
       voucher: null,
+      expiresAt: null,
       status: 'pending',
       createdAt: Date.now(),
     });
@@ -202,6 +244,7 @@ app.get('/api/verify/:reference', async (req, res) => {
     return res.json({
       voucher_code: tx.voucher,
       plan: tx.plan,
+      expires_at: tx.expiresAt,
       status: 'success',
     });
   }
@@ -210,11 +253,15 @@ app.get('/api/verify/:reference', async (req, res) => {
     const data = await verifyWithPaystack(reference);
 
     if (!data.status || data.data?.status !== 'success') {
-      console.warn(`[Verify REJECTED] ${reference}: Paystack status = ${data.data?.status || 'failed'}`);
+      const currentStatus = data.data?.status || 'unknown';
+      // Suppress noisy logs while customer is actively completing payment
+      if (currentStatus !== 'abandoned') {
+        console.warn(`[Verify REJECTED] ${reference}: Paystack status = ${currentStatus}`);
+      }
       return res.status(402).json({
         error: 'Payment not confirmed',
         detail: 'Your payment has not been confirmed by Paystack. No voucher will be issued.',
-        paystack_status: data.data?.status || 'unknown',
+        paystack_status: currentStatus,
       });
     }
 
@@ -236,24 +283,27 @@ app.get('/api/verify/:reference', async (req, res) => {
       });
     }
 
-    // Generate unique voucher code
+    // Generate unique voucher code and expiration comment
     const voucher = generateVoucher();
+    const comment = calculateExpirationComment(plan);
 
     // Create user in MikroTik hotspot via RouterOS API
-    await createMikroTikUser(voucher, voucher, PLANS[plan].profile);
+    await createMikroTikUser(voucher, voucher, PLANS[plan].profile, comment);
 
     // Save transaction completion
     transactions.set(reference, {
       plan,
       voucher,
+      expiresAt: comment,
       status: 'completed',
       createdAt: tx?.createdAt || Date.now(),
     });
 
-    console.log(`[Verify OK] ${reference}: Voucher ${voucher} issued for profile ${PLANS[plan].profile}`);
+    console.log(`[Verify OK] ${reference}: Voucher ${voucher} issued for profile ${PLANS[plan].profile} (expires: ${comment})`);
     return res.json({
       voucher_code: voucher,
       plan,
+      expires_at: comment,
       status: 'success',
     });
   } catch (err) {
@@ -294,15 +344,17 @@ app.post('/api/webhook', (req, res) => {
       const plan = tx?.plan || Object.keys(PLANS).find((k) => PLANS[k].amount === amount);
       if (plan) {
         const voucher = generateVoucher();
-        createMikroTikUser(voucher, voucher, PLANS[plan].profile)
+        const comment = calculateExpirationComment(plan);
+        createMikroTikUser(voucher, voucher, PLANS[plan].profile, comment)
           .then(() => {
             transactions.set(reference, {
               plan,
               voucher,
+              expiresAt: comment,
               status: 'completed',
               createdAt: tx?.createdAt || Date.now(),
             });
-            console.log(`[Webhook OK] Created user for ${reference}: ${voucher}`);
+            console.log(`[Webhook OK] Created user for ${reference}: ${voucher} (expires: ${comment})`);
           })
           .catch((err) => {
             console.error(`[Webhook Error] Failed to create user for ${reference}:`, err.message || err);
@@ -313,8 +365,22 @@ app.post('/api/webhook', (req, res) => {
 });
 
 // ─── Start Server ───────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`[Server] Hotspot payment backend running on port ${PORT}`);
-  console.log(`[Config] MikroTik Target: ${MIKROTIK_HOST}:${MIKROTIK_PORT}`);
-  console.log(`[Config] Plans configured: ${Object.keys(PLANS).join(', ')}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`[Server] Hotspot payment backend running on port ${PORT}`);
+    console.log(`[Config] MikroTik Target: ${MIKROTIK_HOST}:${MIKROTIK_PORT}`);
+    console.log(`[Config] Timezone: ${TIMEZONE}`);
+    console.log(`[Config] Plans configured: ${Object.keys(PLANS).join(', ')}`);
+  });
+}
+
+module.exports = {
+  app,
+  PLANS,
+  TIMEZONE,
+  calculateExpirationComment,
+  formatExpirationDate,
+  generateVoucher,
+  createMikroTikUser,
+  transactions,
+};
